@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stick-Man Bike Ride</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a1a;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    canvas {
+      display: block;
+      border: 2px solid #334;
+      border-radius: 4px;
+      box-shadow: 0 0 40px rgba(80,120,255,0.2);
+    }
+    #instructions {
+      color: #778;
+      font-size: 13px;
+      margin-top: 8px;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="instructions">
+  ↑ Accelerate &nbsp;|&nbsp; ↓ Brake/Reverse &nbsp;|&nbsp; ← Lean Back &nbsp;|&nbsp; → Lean Forward
+</div>
+<script>
+// ─────────────────────────────────────────────
+//  CANVAS SETUP
+// ─────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  const maxW = Math.min(window.innerWidth - 4, 1200);
+  const maxH = Math.min(window.innerHeight - 60, 700);
+  canvas.width  = maxW;
+  canvas.height = maxH;
+}
+resize();
+window.addEventListener('resize', () => { resize(); });
+
+// ─────────────────────────────────────────────
+//  CONSTANTS
+// ─────────────────────────────────────────────
+const GRAVITY        = 0.55;
+const GROUND_FRICTION = 0.985;
+const AIR_DRAG       = 0.999;
+const MAX_SPEED      = 18;
+const ACCEL          = 0.35;
+const BACK_ACCEL     = 0.18;
+const ROTATE_SPEED   = 0.04;
+const WHEEL_RADIUS   = 14;
+const BOOST_SPEED    = 28;
+const BOOST_DURATION = 90;   // frames
+const ENERGY_MAX     = 100;
+const ENERGY_DRAIN   = 0.018;   // per frame moving
+const ENERGY_BOX_INTERVAL = 100; // every 100 m
+const METERS_PER_PX  = 0.1;
+
+// ─────────────────────────────────────────────
+//  INPUT
+// ─────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true;  e.preventDefault(); });
+window.addEventListener('keyup',   e => { keys[e.code] = false; });
+
+// ─────────────────────────────────────────────
+//  TERRAIN GENERATION
+// ─────────────────────────────────────────────
+
+// Terrain is a list of segments, each with x,y (left edge top), width, and type.
+// We represent terrain as an array of x-sorted points (polyline).
+
+let terrainPoints = [];   // [{x,y}, ...]
+let terrainChunks = [];   // generated x ranges
+
+// Special features on the terrain
+let ramps       = [];    // {x, type:'jump'|'speed', width, height}
+let energyBoxes = [];    // {x, y, collected}
+
+const CHUNK_WIDTH = 800;
+
+function noiseVal(x, freq, amp) {
+  // Simple deterministic noise via sin harmonics
+  return Math.sin(x * freq * 0.01)       * amp
+       + Math.sin(x * freq * 0.037 + 1.3) * amp * 0.5
+       + Math.sin(x * freq * 0.11  + 2.7) * amp * 0.25;
+}
+
+function generateChunk(startX) {
+  const baseY   = canvas.height * 0.62;
+  const endX    = startX + CHUNK_WIDTH;
+  const step    = 12;
+
+  // Decide terrain style for this chunk
+  const style = Math.random();
+  let freqMult = 1;
+  if (style < 0.33)      freqMult = 0.6;   // gentle rolling
+  else if (style < 0.66) freqMult = 1.4;   // moderate hills
+  else                   freqMult = 2.2;   // steep/bumpy
+
+  const ampMult = 0.7 + Math.random() * 0.8;
+
+  for (let x = startX; x <= endX; x += step) {
+    const y = baseY
+      + noiseVal(x, freqMult, 70 * ampMult)
+      + noiseVal(x * 2.3, freqMult * 0.4, 25 * ampMult);
+    terrainPoints.push({ x, y: Math.min(y, canvas.height * 0.88) });
+  }
+
+  // Add ramps in this chunk
+  const numRamps = 1 + Math.floor(Math.random() * 3);
+  for (let r = 0; r < numRamps; r++) {
+    const rx = startX + 100 + Math.random() * (CHUNK_WIDTH - 200);
+    const isSpeed = Math.random() < 0.25;
+    const rampH   = isSpeed ? 30 + Math.random() * 20 : 20 + Math.random() * 40;
+    const rampW   = 60 + Math.random() * 80;
+    ramps.push({ x: rx, width: rampW, height: rampH, type: isSpeed ? 'speed' : 'jump' });
+  }
+
+  terrainChunks.push(endX);
+}
+
+function initTerrain() {
+  terrainPoints = [];
+  terrainChunks = [];
+  ramps         = [];
+  energyBoxes   = [];
+
+  // Flat start section
+  const baseY = canvas.height * 0.62;
+  for (let x = -200; x <= 300; x += 12) {
+    terrainPoints.push({ x, y: baseY });
+  }
+
+  // Generate initial chunks
+  for (let i = 0; i < 6; i++) {
+    generateChunk(300 + i * CHUNK_WIDTH);
+  }
+
+  // Seed energy boxes based on world distance
+  for (let d = 1; d <= 80; d++) {
+    const worldX = (d * ENERGY_BOX_INTERVAL) / METERS_PER_PX;
+    energyBoxes.push({ x: worldX, y: 0, collected: false });
+  }
+}
+
+function extendTerrain(cameraX) {
+  const lastChunk = terrainChunks[terrainChunks.length - 1] || 0;
+  if (cameraX + canvas.width + CHUNK_WIDTH > lastChunk) {
+    generateChunk(lastChunk);
+    // Add energy boxes for new distance
+    const newDist = Math.floor(lastChunk * METERS_PER_PX / ENERGY_BOX_INTERVAL) + 1;
+    for (let d = newDist; d <= newDist + 3; d++) {
+      const worldX = (d * ENERGY_BOX_INTERVAL) / METERS_PER_PX;
+      if (!energyBoxes.find(b => b.x === worldX)) {
+        energyBoxes.push({ x: worldX, y: 0, collected: false });
+      }
+    }
+  }
+}
+
+// Get terrain Y at a given world X (linear interpolation)
+function getTerrainY(wx) {
+  // Binary-ish search
+  let lo = 0, hi = terrainPoints.length - 1;
+  if (wx <= terrainPoints[0].x) return terrainPoints[0].y;
+  if (wx >= terrainPoints[hi].x) return terrainPoints[hi].y;
+
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (terrainPoints[mid].x <= wx) lo = mid;
+    else hi = mid;
+  }
+  const t = (wx - terrainPoints[lo].x) / (terrainPoints[hi].x - terrainPoints[lo].x);
+  return terrainPoints[lo].y + t * (terrainPoints[hi].y - terrainPoints[lo].y);
+}
+
+// Get terrain slope angle at world X
+function getTerrainAngle(wx) {
+  const dx = 6;
+  const y1 = getTerrainY(wx - dx);
+  const y2 = getTerrainY(wx + dx);
+  return Math.atan2(y2 - y1, dx * 2);
+}
+
+// ─────────────────────────────────────────────
+//  BIKE / PHYSICS STATE
+// ─────────────────────────────────────────────
+let bike = {};
+
+function initBike() {
+  const startX = 80;
+  const startY = getTerrainY(startX) - WHEEL_RADIUS * 2 - 10;
+  bike = {
+    x:        startX,
+    y:        startY,
+    vx:       0,
+    vy:       0,
+    angle:    0,          // bike tilt angle (radians), 0 = upright
+    angularV: 0,
+    onGround: false,
+    frontContact: false,
+    rearContact:  false,
+    boostFrames:  0,
+    crashed:      false,
+    deadFrames:   0,
+  };
+}
+
+// ─────────────────────────────────────────────
+//  GAME STATE
+// ─────────────────────────────────────────────
+let energy        = ENERGY_MAX;
+let distance      = 0;
+let maxDistance   = 0;
+let highScore     = 0;
+let cameraX       = 0;
+let gameState     = 'playing';  // 'playing' | 'dead' | 'start'
+let particles     = [];
+let screenFlash   = 0;
+let newHighScore  = false;
+let boostEffect   = 0;
+
+// Particles
+function spawnParticles(wx, wy, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = (0.5 + Math.random()) * speed;
+    particles.push({
+      x: wx, y: wy,
+      vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1,
+      life: 1, decay: 0.03 + Math.random() * 0.04,
+      radius: 3 + Math.random() * 4,
+      color
+    });
+  }
+}
+
+// ─────────────────────────────────────────────
+//  WHEEL CONTACT HELPERS
+// ─────────────────────────────────────────────
+function wheelWorldPos(front) {
+  // front wheel offset from bike center
+  const sign = front ? 1 : -1;
+  const wx   = bike.x + sign * Math.cos(bike.angle) * 28;
+  const wy   = bike.y + sign * Math.sin(bike.angle) * 28;
+  return { x: wx, y: wy };
+}
+
+// ─────────────────────────────────────────────
+//  RAMP COLLISION HELPERS
+// ─────────────────────────────────────────────
+function getRampTopY(ramp, wx) {
+  if (wx < ramp.x || wx > ramp.x + ramp.width) return null;
+  const t = (wx - ramp.x) / ramp.width;
+  // ramp shape: rises from left, peaks at 70%, descends back
+  let h;
+  if (t < 0.7) h = (t / 0.7) * ramp.height;
+  else         h = ((1 - t) / 0.3) * ramp.height;
+  const terrY = getTerrainY(wx);
+  return terrY - h;
+}
+
+function getEffectiveGroundY(wx) {
+  let baseY = getTerrainY(wx);
+  for (const r of ramps) {
+    const ry = getRampTopY(r, wx);
+    if (ry !== null) baseY = Math.min(baseY, ry);
+  }
+  return baseY;
+}
+
+// ─────────────────────────────────────────────
+//  PHYSICS UPDATE
+// ─────────────────────────────────────────────
+function updatePhysics() {
+  if (bike.crashed) {
+    bike.deadFrames++;
+    return;
+  }
+
+  // ── Input ──
+  const goRight  = keys['ArrowUp'];
+  const goLeft   = keys['ArrowDown'];
+  const leanLeft = keys['ArrowLeft'];
+  const leanRight = keys['ArrowRight'];
+
+  const boosting = bike.boostFrames > 0;
+  if (boosting) bike.boostFrames--;
+
+  // ── Gravity ──
+  bike.vy += GRAVITY;
+
+  // ── Drive force ──
+  const terrAngle = getTerrainAngle(bike.x);
+  if (goRight) {
+    const fwd = boosting ? BOOST_SPEED * 0.08 : ACCEL;
+    bike.vx += fwd * Math.cos(terrAngle);
+    if (bike.onGround) {
+      energy -= ENERGY_DRAIN * 2;
+    }
+  }
+  if (goLeft) {
+    bike.vx -= BACK_ACCEL;
+    if (bike.onGround) energy -= ENERGY_DRAIN;
+  }
+  if (!goRight && !goLeft && bike.onGround) {
+    energy -= ENERGY_DRAIN * 0.3;
+  }
+
+  // Speed limit
+  const maxV = boosting ? BOOST_SPEED : MAX_SPEED;
+  if (bike.vx > maxV)  bike.vx = maxV;
+  if (bike.vx < -MAX_SPEED * 0.5) bike.vx = -MAX_SPEED * 0.5;
+
+  // ── Angular control ──
+  if (leanLeft)  bike.angularV -= ROTATE_SPEED;
+  if (leanRight) bike.angularV += ROTATE_SPEED;
+
+  // Gravity-based auto-torque (centre of mass above wheels)
+  if (bike.onGround) {
+    // Dampen angular velocity on ground
+    bike.angularV *= 0.78;
+    // Small restoring torque towards terrain angle
+    const diff = terrAngle - bike.angle;
+    bike.angularV += diff * 0.04;
+  } else {
+    bike.angularV *= 0.97;
+  }
+
+  bike.angle    += bike.angularV;
+  bike.angularV *= 0.90;
+
+  // Clamp angle to avoid infinite spinning (but allow flips)
+  // No hard clamp - let it flip
+
+  // ── Drag ──
+  if (bike.onGround) {
+    bike.vx *= GROUND_FRICTION;
+  } else {
+    bike.vx *= AIR_DRAG;
+    bike.vy *= AIR_DRAG;
+  }
+
+  // ── Position integration ──
+  bike.x += bike.vx;
+  bike.y += bike.vy;
+
+  // ── Ground collision ──
+  bike.onGround     = false;
+  bike.frontContact = false;
+  bike.rearContact  = false;
+
+  const fw = wheelWorldPos(true);
+  const rw = wheelWorldPos(false);
+
+  for (const [wheel, isFront] of [[fw, true], [rw, false]]) {
+    const groundY = getEffectiveGroundY(wheel.x) - WHEEL_RADIUS;
+    if (wheel.y >= groundY) {
+      // Push bike up
+      const pen = wheel.y - groundY;
+      bike.y  -= pen * 0.95;
+      bike.vy  = Math.min(bike.vy, 0) * -0.25;  // bounce damping
+      bike.onGround = true;
+      if (isFront) bike.frontContact = true;
+      else         bike.rearContact  = true;
+    }
+  }
+
+  // ── Speed ramp boost ──
+  for (const ramp of ramps) {
+    if (ramp.type === 'speed' && bike.boostFrames <= 0) {
+      const distToRamp = Math.abs(bike.x - (ramp.x + ramp.width * 0.5));
+      if (distToRamp < ramp.width * 0.6 && bike.onGround) {
+        // Check if actually on/near ramp
+        const ry = getRampTopY(ramp, bike.x);
+        const by = getEffectiveGroundY(bike.x) - WHEEL_RADIUS;
+        if (ry !== null && Math.abs(bike.y - by) < 30) {
+          bike.boostFrames = BOOST_DURATION;
+          bike.vx = Math.max(bike.vx, BOOST_SPEED * 0.7);
+          boostEffect = 60;
+          spawnParticles(bike.x, bike.y, '#ffe040', 20, 6);
+          break;
+        }
+      }
+    }
+  }
+
+  // ── Energy box collection ──
+  for (const box of energyBoxes) {
+    if (!box.collected && Math.abs(bike.x - box.x) < 35) {
+      box.collected = true;
+      const refill = 35 + Math.random() * 20;
+      energy = Math.min(ENERGY_MAX, energy + refill);
+      spawnParticles(bike.x, bike.y - 40, '#44ff88', 18, 4);
+      screenFlash = 8;
+    }
+  }
+
+  // ── Distance ──
+  const d = bike.x * METERS_PER_PX;
+  if (d > distance) distance = d;
+  if (distance > maxDistance) maxDistance = distance;
+
+  // ── Energy depletion ──
+  energy = Math.max(0, energy);
+  if (energy <= 0) {
+    die('energy');
+  }
+
+  // ── Crash detection ──
+  // If angle is beyond ±100° AND wheel hits ground in that state
+  const absAngle = Math.abs(bike.angle % (Math.PI * 2));
+  const normalised = absAngle > Math.PI ? Math.PI * 2 - absAngle : absAngle;
+  if (normalised > Math.PI * 0.55 && bike.onGround) {
+    die('crash');
+  }
+
+  // Extend terrain if needed
+  extendTerrain(cameraX);
+
+  // Boost effect timer
+  if (boostEffect > 0) boostEffect--;
+}
+
+function die(reason) {
+  if (bike.crashed) return;
+  bike.crashed = true;
+  if (distance > highScore) {
+    highScore    = distance;
+    newHighScore = true;
+  }
+  gameState = 'dead';
+  spawnParticles(bike.x, bike.y, reason === 'crash' ? '#ff4040' : '#ffaa00', 30, 7);
+  screenFlash = 25;
+}
+
+// ─────────────────────────────────────────────
+//  UPDATE PARTICLES
+// ─────────────────────────────────────────────
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vy += GRAVITY * 0.5;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  CAMERA
+// ─────────────────────────────────────────────
+function updateCamera() {
+  const targetX = bike.x - canvas.width * 0.35;
+  cameraX += (targetX - cameraX) * 0.08;
+}
+
+// ─────────────────────────────────────────────
+//  DRAWING HELPERS
+// ─────────────────────────────────────────────
+function wx2sx(wx) { return wx - cameraX; }
+function wy2sy(wy) { return wy; }
+
+function drawSky() {
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.65);
+  grad.addColorStop(0,   '#0d1b3e');
+  grad.addColorStop(0.5, '#1a3460');
+  grad.addColorStop(1,   '#2a5080');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  // Use deterministic pseudo-random for stars
+  for (let i = 0; i < 80; i++) {
+    const sx = ((i * 137.508 + cameraX * 0.02) % canvas.width + canvas.width) % canvas.width;
+    const sy = ((i * 79.3 + 17) % (canvas.height * 0.55));
+    const r  = i % 3 === 0 ? 1.5 : 0.8;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawTerrain() {
+  // Find visible points
+  const margin = 60;
+  const pts = terrainPoints.filter(p => p.x >= cameraX - margin && p.x <= cameraX + canvas.width + margin);
+  if (pts.length < 2) return;
+
+  // Ground fill
+  ctx.beginPath();
+  ctx.moveTo(wx2sx(pts[0].x), wy2sy(pts[0].y));
+  for (const p of pts) ctx.lineTo(wx2sx(p.x), wy2sy(p.y));
+  ctx.lineTo(wx2sx(pts[pts.length-1].x), canvas.height + 10);
+  ctx.lineTo(wx2sx(pts[0].x), canvas.height + 10);
+  ctx.closePath();
+
+  const grad = ctx.createLinearGradient(0, canvas.height * 0.55, 0, canvas.height);
+  grad.addColorStop(0,   '#2d5a1b');
+  grad.addColorStop(0.15,'#3a7022');
+  grad.addColorStop(0.4, '#5a4a2a');
+  grad.addColorStop(1,   '#3a2a18');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Surface line
+  ctx.beginPath();
+  ctx.moveTo(wx2sx(pts[0].x), wy2sy(pts[0].y));
+  for (const p of pts) ctx.lineTo(wx2sx(p.x), wy2sy(p.y));
+  ctx.strokeStyle = '#7ed44a';
+  ctx.lineWidth   = 3;
+  ctx.stroke();
+
+  // Grass tufts
+  ctx.strokeStyle = '#5eaa30';
+  ctx.lineWidth   = 1.5;
+  for (let i = 0; i < pts.length; i += 3) {
+    const p = pts[i];
+    const sx = wx2sx(p.x);
+    const ang = getTerrainAngle(p.x);
+    ctx.save();
+    ctx.translate(sx, wy2sy(p.y));
+    ctx.rotate(ang);
+    for (let j = -1; j <= 1; j++) {
+      ctx.beginPath();
+      ctx.moveTo(j * 3, 0);
+      ctx.lineTo(j * 4 - 1, -7 - Math.random() * 3);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+function drawRamps() {
+  for (const ramp of ramps) {
+    const sx = wx2sx(ramp.x);
+    if (sx > canvas.width + 100 || sx < -200) continue;
+
+    ctx.save();
+    ctx.beginPath();
+    const steps = 20;
+    for (let i = 0; i <= steps; i++) {
+      const t  = i / steps;
+      const wx = ramp.x + t * ramp.width;
+      const ry = getRampTopY(ramp, wx);
+      if (ry === null) continue;
+      if (i === 0) ctx.moveTo(wx2sx(wx), ry);
+      else          ctx.lineTo(wx2sx(wx), ry);
+    }
+    const baseY = getTerrainY(ramp.x + ramp.width * 0.5);
+    ctx.lineTo(wx2sx(ramp.x + ramp.width), baseY);
+    ctx.lineTo(wx2sx(ramp.x), baseY);
+    ctx.closePath();
+
+    if (ramp.type === 'speed') {
+      const g = ctx.createLinearGradient(sx, 0, sx + ramp.width, 0);
+      g.addColorStop(0, '#ff8c00');
+      g.addColorStop(1, '#ffdd00');
+      ctx.fillStyle   = g;
+      ctx.strokeStyle = '#ffaa00';
+    } else {
+      ctx.fillStyle   = '#5a4030';
+      ctx.strokeStyle = '#8a6040';
+    }
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+
+    if (ramp.type === 'speed') {
+      // Draw lightning bolt icon
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 18px serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚡', wx2sx(ramp.x + ramp.width * 0.5), getTerrainY(ramp.x + ramp.width * 0.5) - ramp.height * 0.5 - 8);
+    }
+    ctx.restore();
+  }
+}
+
+function drawEnergyBoxes() {
+  for (const box of energyBoxes) {
+    if (box.collected) continue;
+    const sx = wx2sx(box.x);
+    if (sx < -40 || sx > canvas.width + 40) continue;
+
+    const sy = getEffectiveGroundY(box.x) - 44;
+    box.y = sy;
+
+    const t  = performance.now() * 0.003;
+    const oy = Math.sin(t + box.x * 0.01) * 5;
+
+    ctx.save();
+    ctx.translate(sx, sy + oy);
+
+    // Glow
+    const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, 22);
+    glow.addColorStop(0,   'rgba(80,255,160,0.35)');
+    glow.addColorStop(1,   'rgba(80,255,160,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(-22, -22, 44, 44);
+
+    // Box
+    ctx.fillStyle   = '#1a8a4a';
+    ctx.strokeStyle = '#44ff88';
+    ctx.lineWidth   = 2;
+    ctx.fillRect(-12, -12, 24, 24);
+    ctx.strokeRect(-12, -12, 24, 24);
+
+    // Cross symbol
+    ctx.fillStyle = '#44ff88';
+    ctx.fillRect(-2, -8, 4, 16);
+    ctx.fillRect(-8, -2, 16, 4);
+
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle   = p.color;
+    ctx.beginPath();
+    ctx.arc(wx2sx(p.x), wy2sy(p.y), p.radius * p.life, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── STICK FIGURE BIKE DRAW ──
+function drawBike() {
+  ctx.save();
+  ctx.translate(wx2sx(bike.x), wy2sy(bike.y));
+  ctx.rotate(bike.angle);
+
+  const WR = WHEEL_RADIUS;
+
+  // Boost glow
+  if (bike.boostFrames > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    const bGlow = ctx.createRadialGradient(0, 0, WR, 0, 0, WR * 4);
+    bGlow.addColorStop(0,   '#ffe040');
+    bGlow.addColorStop(1,   'rgba(255,200,0,0)');
+    ctx.fillStyle = bGlow;
+    ctx.beginPath();
+    ctx.arc(0, 0, WR * 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Wheels
+  const drawWheel = (cx, cy) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, WR, 0, Math.PI * 2);
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth   = 3;
+    ctx.stroke();
+    // Hub
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#aaa';
+    ctx.fill();
+    // Spokes
+    for (let s = 0; s < 6; s++) {
+      const a = s * Math.PI / 3 + (bike.x * 0.05);
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(a) * WR, cy + Math.sin(a) * WR);
+      ctx.strokeStyle = '#888';
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+    }
+  };
+
+  drawWheel( 28, 6);  // front
+  drawWheel(-28, 6);  // rear
+
+  // Frame
+  ctx.strokeStyle = '#ddd';
+  ctx.lineWidth   = 3;
+  ctx.lineCap     = 'round';
+
+  // Seat tube
+  ctx.beginPath();
+  ctx.moveTo(-8, 6);
+  ctx.lineTo(-6, -18);
+  ctx.stroke();
+
+  // Top tube
+  ctx.beginPath();
+  ctx.moveTo(-6, -18);
+  ctx.lineTo(14, -16);
+  ctx.stroke();
+
+  // Down tube
+  ctx.beginPath();
+  ctx.moveTo(-6, -18);
+  ctx.lineTo(-28, 6);
+  ctx.stroke();
+
+  // Chain stay
+  ctx.beginPath();
+  ctx.moveTo(-28, 6);
+  ctx.lineTo(-8, 6);
+  ctx.stroke();
+
+  // Fork
+  ctx.beginPath();
+  ctx.moveTo(14, -16);
+  ctx.lineTo(28, 6);
+  ctx.stroke();
+
+  // Handle bar
+  ctx.beginPath();
+  ctx.moveTo(10, -18);
+  ctx.lineTo(18, -18);
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Seat
+  ctx.beginPath();
+  ctx.moveTo(-10, -20);
+  ctx.lineTo(-2, -20);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#bbb';
+  ctx.stroke();
+
+  // Pedals (static for simplicity)
+  ctx.beginPath();
+  ctx.arc(-8, 6, 5, 0, Math.PI * 2);
+  ctx.strokeStyle = '#aaa';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+
+  // ── Stick figure rider ──
+  ctx.strokeStyle = '#f0c060';
+  ctx.lineWidth   = 2.5;
+  ctx.lineCap     = 'round';
+
+  // Torso
+  ctx.beginPath();
+  ctx.moveTo(-5, -22);
+  ctx.lineTo(4, -42);
+  ctx.stroke();
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(6, -50, 8, 0, Math.PI * 2);
+  ctx.strokeStyle = '#f0c060';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#f0c060';
+  ctx.fill();
+
+  // Face
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.arc(8, -52, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(10, -48, 1.5, 0, Math.PI*2);
+  ctx.fill();
+
+  // Arms to handlebar
+  ctx.strokeStyle = '#f0c060';
+  ctx.lineWidth   = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(4, -42);
+  ctx.lineTo(14, -20);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(4, -42);
+  ctx.lineTo(12, -19);
+  ctx.stroke();
+
+  // Legs to pedals
+  ctx.beginPath();
+  ctx.moveTo(-5, -22);
+  ctx.lineTo(-4, -6);
+  ctx.lineTo(-3, 6);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(-5, -22);
+  ctx.lineTo(-10, -4);
+  ctx.lineTo(-13, 6);
+  ctx.stroke();
+
+  // Helmet
+  ctx.fillStyle = '#e63030';
+  ctx.beginPath();
+  ctx.ellipse(6, -54, 9, 6, -0.2, Math.PI, 0);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────
+//  HUD
+// ─────────────────────────────────────────────
+function drawHUD() {
+  const pad = 16;
+
+  // ── Energy bar ──
+  const barW  = 200;
+  const barH  = 18;
+  const barX  = pad;
+  const barY  = pad;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.roundRect(barX - 4, barY - 4, barW + 8 + 80, barH + 8, 6);
+  ctx.fill();
+
+  // Background
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(barX, barY, barW, barH);
+
+  // Fill
+  const pct = energy / ENERGY_MAX;
+  const col = pct > 0.5 ? `hsl(${120 * pct},80%,50%)` : `hsl(${120 * pct},90%,55%)`;
+  ctx.fillStyle = col;
+  ctx.fillRect(barX, barY, barW * pct, barH);
+
+  // Border
+  ctx.strokeStyle = '#556';
+  ctx.lineWidth   = 1.5;
+  ctx.strokeRect(barX, barY, barW, barH);
+
+  // Label
+  ctx.fillStyle   = '#fff';
+  ctx.font        = 'bold 12px monospace';
+  ctx.textAlign   = 'left';
+  ctx.fillText('⚡ ENERGY', barX + barW + 8, barY + 13);
+
+  // ── Distance & High Score ──
+  const distStr  = `${Math.floor(distance)} m`;
+  const hsStr    = `${Math.floor(highScore)} m`;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.roundRect(canvas.width - 210, pad - 4, 206, 52, 6);
+  ctx.fill();
+
+  ctx.fillStyle = '#aac';
+  ctx.font      = '12px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('DISTANCE', canvas.width - pad, pad + 12);
+
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 22px monospace';
+  ctx.fillText(distStr, canvas.width - pad, pad + 34);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.roundRect(canvas.width - 210, pad + 58, 206, 48, 6);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffcc44';
+  ctx.font      = '12px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('BEST', canvas.width - pad, pad + 74);
+
+  ctx.fillStyle = '#ffdd66';
+  ctx.font      = 'bold 20px monospace';
+  ctx.fillText(hsStr, canvas.width - pad, pad + 94);
+
+  // ── Boost indicator ──
+  if (bike.boostFrames > 0) {
+    const bt = bike.boostFrames / BOOST_DURATION;
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle   = 'rgba(0,0,0,0.5)';
+    ctx.roundRect(canvas.width / 2 - 70, 12, 140, 28, 6);
+    ctx.fill();
+    ctx.fillStyle   = '#ffe040';
+    ctx.font        = 'bold 16px monospace';
+    ctx.textAlign   = 'center';
+    ctx.fillText(`⚡ BOOST  ${Math.ceil(bt * 100)}%`, canvas.width / 2, 31);
+    ctx.restore();
+  }
+
+  // ── New high score banner ──
+  if (newHighScore && gameState === 'dead') {
+    ctx.save();
+    const t    = performance.now() * 0.003;
+    const glow = Math.sin(t) * 0.3 + 0.7;
+    ctx.globalAlpha = glow;
+    ctx.fillStyle   = '#ffdd00';
+    ctx.font        = 'bold 28px monospace';
+    ctx.textAlign   = 'center';
+    ctx.shadowColor  = '#ff8800';
+    ctx.shadowBlur   = 20;
+    ctx.fillText('★  NEW BEST SCORE!  ★', canvas.width / 2, canvas.height * 0.3);
+    ctx.restore();
+  }
+}
+
+// ─────────────────────────────────────────────
+//  DEATH / RESTART SCREEN
+// ─────────────────────────────────────────────
+function drawDeadScreen() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+
+  ctx.fillStyle = 'rgba(10,10,30,0.85)';
+  ctx.roundRect(cx - 200, cy - 100, 400, 200, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#334';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+
+  ctx.fillStyle   = '#ff5555';
+  ctx.font        = 'bold 32px monospace';
+  ctx.textAlign   = 'center';
+  ctx.fillText('CRASHED!', cx, cy - 54);
+
+  ctx.fillStyle   = '#ccc';
+  ctx.font        = '18px monospace';
+  ctx.fillText(`Distance: ${Math.floor(distance)} m`, cx, cy - 12);
+  ctx.fillStyle   = '#ffcc44';
+  ctx.fillText(`Best: ${Math.floor(highScore)} m`, cx, cy + 18);
+
+  // Pulsing restart button
+  const pulse = Math.sin(performance.now() * 0.005) * 0.1 + 0.9;
+  ctx.save();
+  ctx.scale(pulse, pulse);
+  ctx.fillStyle   = '#2a7a3a';
+  ctx.roundRect(cx / pulse - 100, (cy + 45) / pulse, 200, 40, 8);
+  ctx.fill();
+  ctx.fillStyle   = '#fff';
+  ctx.font        = 'bold 18px monospace';
+  ctx.fillText('PRESS  SPACE  /  ENTER', cx / pulse, (cy + 71) / pulse);
+  ctx.restore();
+
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────
+//  SCREEN FLASH OVERLAY
+// ─────────────────────────────────────────────
+function drawFlash() {
+  if (screenFlash <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = screenFlash / 30 * 0.5;
+  ctx.fillStyle   = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+  screenFlash--;
+}
+
+// ─────────────────────────────────────────────
+//  BOOST MOTION BLUR OVERLAY
+// ─────────────────────────────────────────────
+function drawBoostEffect() {
+  if (boostEffect <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = (boostEffect / 60) * 0.25;
+  const grad = ctx.createLinearGradient(0, 0, canvas.width, 0);
+  grad.addColorStop(0,   'rgba(255,220,0,0.8)');
+  grad.addColorStop(0.5, 'rgba(255,220,0,0)');
+  grad.addColorStop(1,   'rgba(255,220,0,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
+// ─────────────────────────────────────────────
+//  RESTART
+// ─────────────────────────────────────────────
+function restart() {
+  energy       = ENERGY_MAX;
+  distance     = 0;
+  maxDistance  = 0;
+  newHighScore = false;
+  gameState    = 'playing';
+  screenFlash  = 0;
+  boostEffect  = 0;
+  particles    = [];
+  initTerrain();
+  initBike();
+  cameraX = bike.x - canvas.width * 0.35;
+}
+
+window.addEventListener('keydown', e => {
+  if ((e.code === 'Space' || e.code === 'Enter') && gameState === 'dead') {
+    restart();
+  }
+});
+
+// ─────────────────────────────────────────────
+//  MAIN LOOP
+// ─────────────────────────────────────────────
+function loop() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (gameState === 'playing') {
+    updatePhysics();
+    updateParticles();
+    updateCamera();
+  }
+
+  drawSky();
+  drawTerrain();
+  drawRamps();
+  drawEnergyBoxes();
+  drawParticles();
+  drawBike();
+  drawBoostEffect();
+  drawHUD();
+  drawFlash();
+
+  if (gameState === 'dead') {
+    updateParticles();
+    drawDeadScreen();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ─────────────────────────────────────────────
+//  INIT
+// ─────────────────────────────────────────────
+restart();
+loop();
+</script>
+</body>
+</html>
