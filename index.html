@@ -28,23 +28,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  POLYFILL – roundRect
 // ─────────────────────────────────────────────────────────────────────────────
-if (!CanvasRenderingContext2D.prototype.roundRect) {
-  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, radii) {
-    let tl, tr, br, bl;
-    if (Array.isArray(radii)) { [tl=0,tr=tl,br=tl,bl=tr]=radii; }
-    else { tl=tr=br=bl=(radii||0); }
-    const mn=(v)=>Math.min(v,w/2,h/2);
-    tl=mn(tl); tr=mn(tr); br=mn(br); bl=mn(bl);
-    this.beginPath();
-    this.moveTo(x+tl,y);
-    this.lineTo(x+w-tr,y);     this.arcTo(x+w,y,    x+w,y+h, tr);
-    this.lineTo(x+w,y+h-br);   this.arcTo(x+w,y+h,  x,  y+h, br);
-    this.lineTo(x+bl,y+h);     this.arcTo(x,  y+h,  x,  y,   bl);
-    this.lineTo(x,y+tl);       this.arcTo(x,  y,    x+w,y,   tl);
-    this.closePath();
-    return this;
-  };
-}
+// Always override roundRect — native version does NOT call beginPath(),
+// which causes all shapes to accumulate into one path (the blue-dot bug).
+CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+  const rv = Array.isArray(r) ? (r[0]||0) : (r||0);
+  const rc = Math.min(rv, w/2, h/2);
+  this.beginPath();
+  this.moveTo(x+rc, y);
+  this.arcTo(x+w, y,   x+w, y+h, rc);
+  this.arcTo(x+w, y+h, x,   y+h, rc);
+  this.arcTo(x,   y+h, x,   y,   rc);
+  this.arcTo(x,   y,   x+w, y,   rc);
+  this.closePath();
+  return this;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  CANVAS
@@ -145,8 +142,9 @@ let _seed=1;
 function initTerrain() {
   terrPts=[]; chunks=[]; ramps=[]; ebox=[]; _seed=1;
   const BASE=canvas.height*0.58;
-  for (let x=-300;x<=350;x+=10) terrPts.push({x,y:BASE});
-  for (let i=0;i<7;i++) genChunk(350+i*CHUNK_W,++_seed);
+  // Longer flat start (800px) so player builds speed before hitting hills
+  for (let x=-300;x<=800;x+=10) terrPts.push({x,y:BASE});
+  for (let i=0;i<7;i++) genChunk(800+i*CHUNK_W,++_seed);
   seedBoxes();
 }
 function seedBoxes() {
@@ -334,19 +332,15 @@ const sX=wx=>wx-camX;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  DRAW – BACKGROUND
-//  Exact colors from the actual game's tiledbackground2 tile: #868688 / #7a7a7c
-//  Tile size 250px → each checker square = 125px
+//  Static checkerboard – exact tile colors from game (#868688 / #7a7a7c).
+//  No parallax: the real game's TiledBackground is viewport-fixed.
 // ─────────────────────────────────────────────────────────────────────────────
 function drawBackground(){
   const sq = 125;
-  // Very slight parallax (0.12×) so it doesn't look totally static
-  const offX = ((-camX * 0.12) % sq + sq * 2) % sq;
-  for(let ty=0; ty<canvas.height+sq; ty+=sq){
-    for(let tx=-offX; tx<canvas.width+sq; tx+=sq){
-      const row = Math.floor(ty/sq);
-      const col = Math.floor((tx+offX)/sq);
+  for(let row=0; row*sq < canvas.height+sq; row++){
+    for(let col=0; col*sq < canvas.width+sq; col++){
       ctx.fillStyle = (row+col)%2===0 ? '#868688' : '#7a7a7c';
-      ctx.fillRect(tx,ty,sq,sq);
+      ctx.fillRect(col*sq, row*sq, sq, sq);
     }
   }
 }
@@ -551,38 +545,38 @@ function drawBike(){
 
   // ── Rider – all pure #FF0000 capsules, exactly as in the game sprites ──
 
-  // Legs (two red capsules going to pedal area – offset for cycling pose)
-  const speed = (fw.vx+rw.vx)/2;
-  const pedalAngle = fw.spin * 0.8;
-  // Leg 1 (front leg)
-  redCapsule(-AD*0.08 + Math.cos(pedalAngle)*16,
-             -12      + Math.sin(pedalAngle)*10,
-             10, 30, pedalAngle*0.5);
-  // Leg 2 (back leg)
-  redCapsule(-AD*0.08 + Math.cos(pedalAngle+Math.PI)*16,
-             -12      + Math.sin(pedalAngle+Math.PI)*10,
-             10, 30, pedalAngle*0.5+Math.PI);
+  // Leg cycling: use wheel spin for phase but keep displacement tiny
+  // so legs stay near the body and just swing, never orbit or dislocate.
+  const phase = fw.spin;   // advances with wheel rotation
+  const swA = Math.sin(phase) * 0.32;   // max ±18° swing
+  const swB = Math.sin(phase + Math.PI) * 0.32;
+  const hipX = -AD*0.06, hipY = -18;
+
+  // Leg 1
+  redCapsule(hipX + Math.sin(swA)*4,  hipY + Math.cos(swA)*3,  10, 30, swA);
+  // Leg 2
+  redCapsule(hipX + Math.sin(swB)*4,  hipY + Math.cos(swB)*3,  10, 30, swB);
 
   // Body (tall red capsule – bodi_rider sprite)
   redCapsule(-AD*0.12, -42, 22, 48, 0);
 
   // Arms (red capsules reaching toward handlebar)
-  redCapsule(AD*0.06, -42, 9, 28,  0.5);
-  redCapsule(AD*0.14, -40, 9, 26,  0.3);
+  redCapsule(AD*0.04, -44, 9, 26, 0.5);
+  redCapsule(AD*0.12, -42, 9, 24, 0.3);
 
   // Head (red circle – head sprite)
   ctx.beginPath(); ctx.arc(-AD*0.08, -70, 13, 0, Math.PI*2);
   ctx.fillStyle='#FF0000'; ctx.fill();
 
-  // Black shoes/feet (teardrop shape – from sheet1)
+  // Black shoes – fixed small ovals near leg tips (no orbit)
   ctx.fillStyle='#000';
   ctx.beginPath();
-  ctx.ellipse(-AD*0.08+Math.cos(pedalAngle)*18,
-              -4+Math.sin(pedalAngle)*10, 9, 5, pedalAngle*0.4, 0, Math.PI*2);
+  ctx.ellipse(hipX + Math.sin(swA)*4 + Math.sin(swA)*12,
+              hipY + Math.cos(swA)*3 + 14, 8, 4, swA, 0, Math.PI*2);
   ctx.fill();
   ctx.beginPath();
-  ctx.ellipse(-AD*0.08+Math.cos(pedalAngle+Math.PI)*18,
-              -4+Math.sin(pedalAngle+Math.PI)*10, 9, 5, pedalAngle*0.4+Math.PI, 0, Math.PI*2);
+  ctx.ellipse(hipX + Math.sin(swB)*4 + Math.sin(swB)*12,
+              hipY + Math.cos(swB)*3 + 14, 8, 4, swB, 0, Math.PI*2);
   ctx.fill();
 
   ctx.restore();
@@ -604,63 +598,69 @@ function drawParticles(){
 //  DRAW – HUD  (flat, bold, matching game's UI palette)
 // ─────────────────────────────────────────────────────────────────────────────
 function drawHUD(){
+  ctx.save();
+  ctx.textBaseline='alphabetic';
   const PAD=12;
 
   // ── Battery energy bar (top-left) ──
-  const BX=PAD,BY=PAD,BW=160,BH=22;
-  // Outer shell
-  ctx.fillStyle='#111';
-  ctx.roundRect(BX,BY,BW,BH,4);ctx.fill();
-  // Battery tip
-  ctx.fillStyle='#111';
-  ctx.fillRect(BX+BW,BY+6,5,10);
-  // Inner fill
+  // Use fillRect throughout – no roundRect path issues
+  const BX=PAD, BY=PAD, BW=160, BH=22;
+  // White outline so bar is always visible against any background
+  ctx.fillStyle='#fff';       ctx.fillRect(BX-2,BY-2, BW+11, BH+4);
+  // Black shell
+  ctx.fillStyle='#111';       ctx.fillRect(BX,BY, BW,BH);
+  // Battery nub
+  ctx.fillStyle='#111';       ctx.fillRect(BX+BW, BY+6, 5, 10);
+  // Coloured fill
   const pct=energy/ENERGY_MAX;
-  ctx.fillStyle=pct>0.5?'#2ecc40':pct>0.25?'#ffaa00':'#ee0000';
-  if(pct>0){
-    ctx.roundRect(BX+2,BY+2,(BW-4)*pct,BH-4,[3,pct>0.98?3:0,pct>0.98?3:0,3]);
-    ctx.fill();
+  const barFill = pct>0.5 ? '#2ecc40' : pct>0.25 ? '#ffaa00' : '#ee0000';
+  if(pct>0.004){
+    ctx.fillStyle=barFill;
+    ctx.fillRect(BX+2, BY+2, Math.max(0,(BW-4)*pct), BH-4);
   }
-  // "ENERGY" text
-  ctx.fillStyle='#fff';ctx.font='bold 11px Arial Black';ctx.textAlign='left';
-  ctx.fillText('ENERGY',BX+BW+10,BY+15);
+  // "ENERGY" label
+  ctx.fillStyle='#111'; ctx.font='bold 11px Arial Black'; ctx.textAlign='left';
+  ctx.fillText('ENERGY', BX+BW+10, BY+15);
 
   // ── Distance counter (top-right) ──
-  const DW=170,DX=canvas.width-DW-PAD,DY=PAD;
-  ctx.fillStyle='#111';ctx.roundRect(DX,DY,DW,30,4);ctx.fill();
-  ctx.fillStyle='#2ecc40';ctx.font='bold 10px Arial Black';ctx.textAlign='left';
-  ctx.fillText('DISTANCE',DX+8,DY+11);
-  ctx.fillStyle='#fff';ctx.font='bold 18px Arial Black';
-  ctx.fillText(`${Math.floor(distance)} m`,DX+8,DY+27);
+  const DW=170, DX=canvas.width-DW-PAD, DY=PAD;
+  ctx.fillStyle='#fff'; ctx.fillRect(DX-2,DY-2, DW+4, 32);
+  ctx.fillStyle='#111'; ctx.fillRect(DX, DY, DW, 30);
+  ctx.fillStyle='#2ecc40'; ctx.font='bold 10px Arial Black'; ctx.textAlign='left';
+  ctx.fillText('DISTANCE', DX+8, DY+11);
+  ctx.fillStyle='#fff'; ctx.font='bold 18px Arial Black';
+  ctx.fillText(`${Math.floor(distance)} m`, DX+8, DY+27);
 
   // ── Best score ──
-  const BestX=canvas.width-DW-PAD,BestY=DY+38;
-  ctx.fillStyle='#111';ctx.roundRect(BestX,BestY,DW,26,4);ctx.fill();
-  ctx.fillStyle='#ffdd00';ctx.font='bold 10px Arial Black';ctx.textAlign='left';
-  ctx.fillText('BEST',BestX+8,BestY+11);
-  ctx.fillStyle='#ffdd00';ctx.font='bold 16px Arial Black';
-  ctx.fillText(`${Math.floor(highScore)} m`,BestX+8,BestY+24);
+  const BestX=DX, BestY=DY+38;
+  ctx.fillStyle='#fff'; ctx.fillRect(BestX-2,BestY-2, DW+4, 30);
+  ctx.fillStyle='#111'; ctx.fillRect(BestX, BestY, DW, 28);
+  ctx.fillStyle='#ffdd00'; ctx.font='bold 10px Arial Black'; ctx.textAlign='left';
+  ctx.fillText('BEST', BestX+8, BestY+11);
+  ctx.fillStyle='#ffdd00'; ctx.font='bold 16px Arial Black';
+  ctx.fillText(`${Math.floor(highScore)} m`, BestX+8, BestY+25);
 
   // ── Boost bar (centre top) ──
   if(boostFrames>0){
-    const bt=boostFrames/BOOST_DUR,BCX=canvas.width/2;
-    ctx.fillStyle='#111';ctx.roundRect(BCX-80,8,160,24,4);ctx.fill();
-    ctx.fillStyle='#FFD700';
-    ctx.roundRect(BCX-78,10,156*bt,20,3);ctx.fill();
-    ctx.fillStyle='#000';ctx.font='bold 11px Arial Black';ctx.textAlign='center';
-    ctx.fillText('⚡ SPEED BOOST',BCX,25);
+    const bt=boostFrames/BOOST_DUR, BCX=canvas.width/2;
+    ctx.fillStyle='#fff'; ctx.fillRect(BCX-82,6, 164,28);
+    ctx.fillStyle='#111'; ctx.fillRect(BCX-80,8, 160,24);
+    ctx.fillStyle='#FFD700'; ctx.fillRect(BCX-78,10, 156*bt,20);
+    ctx.fillStyle='#000'; ctx.font='bold 11px Arial Black'; ctx.textAlign='center';
+    ctx.fillText('⚡ SPEED BOOST', BCX, 26);
   }
 
   // ── New best banner ──
   if(newBest&&gameState==='dead'){
     const tw=Math.sin(performance.now()*0.005)*0.2+0.8;
-    ctx.save();ctx.globalAlpha=tw;
-    ctx.fillStyle='#FFD700';ctx.font='bold 30px Arial Black';ctx.textAlign='center';
-    ctx.strokeStyle='#000';ctx.lineWidth=4;
-    ctx.strokeText('★ NEW BEST SCORE! ★',canvas.width/2,canvas.height*0.22);
-    ctx.fillText('★ NEW BEST SCORE! ★',canvas.width/2,canvas.height*0.22);
-    ctx.restore();
+    ctx.globalAlpha=tw;
+    ctx.fillStyle='#FFD700'; ctx.font='bold 30px Arial Black'; ctx.textAlign='center';
+    ctx.strokeStyle='#000'; ctx.lineWidth=4;
+    ctx.strokeText('★ NEW BEST SCORE! ★', canvas.width/2, canvas.height*0.22);
+    ctx.fillText ('★ NEW BEST SCORE! ★', canvas.width/2, canvas.height*0.22);
   }
+
+  ctx.restore();
 }
 
 function drawFlash(){
@@ -684,41 +684,45 @@ function drawBoostVfx(){
 //  DRAW – GAME OVER SCREEN  (bold flat style matching the game's UI)
 // ─────────────────────────────────────────────────────────────────────────────
 function drawDead(){
-  ctx.fillStyle='rgba(0,0,0,0.6)';ctx.fillRect(0,0,canvas.width,canvas.height);
-  const cx=canvas.width/2,cy=canvas.height/2;
+  ctx.save();
+  ctx.textBaseline='alphabetic';
 
-  // Panel
-  ctx.fillStyle='#111';
-  ctx.roundRect(cx-200,cy-110,400,220,10);ctx.fill();
-  ctx.strokeStyle='#333';ctx.lineWidth=2;
-  ctx.roundRect(cx-200,cy-110,400,220,10);ctx.stroke();
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  const cx=canvas.width/2, cy=canvas.height/2;
+
+  // Panel – use fillRect/strokeRect, not roundRect, to avoid any path issue
+  ctx.fillStyle='#111';   ctx.fillRect(cx-200,cy-110,400,220);
+  ctx.strokeStyle='#444'; ctx.lineWidth=2;
+  ctx.strokeRect(cx-200,cy-110,400,220);
 
   // Title
   ctx.fillStyle=energy<=0?'#ffaa00':'#ff0000';
-  ctx.font='bold 32px Arial Black';ctx.textAlign='center';
-  ctx.fillText(energy<=0?'OUT OF ENERGY':'CRASHED!',cx,cy-62);
+  ctx.font='bold 32px Arial Black'; ctx.textAlign='center';
+  ctx.fillText(energy<=0?'OUT OF ENERGY':'CRASHED!', cx, cy-62);
 
   // Stats
-  ctx.fillStyle='#fff';ctx.font='bold 18px Arial Black';
-  ctx.fillText(`${Math.floor(distance)} m`,cx,cy-22);
-  ctx.fillStyle='#aaa';ctx.font='14px Arial';
-  ctx.fillText('distance',cx,cy-4);
+  ctx.fillStyle='#fff'; ctx.font='bold 18px Arial Black';
+  ctx.fillText(`${Math.floor(distance)} m`, cx, cy-22);
+  ctx.fillStyle='#aaa'; ctx.font='14px Arial';
+  ctx.fillText('distance', cx, cy-4);
+  ctx.fillStyle='#FFD700'; ctx.font='bold 16px Arial Black';
+  ctx.fillText(`BEST: ${Math.floor(highScore)} m`, cx, cy+22);
 
-  ctx.fillStyle='#FFD700';ctx.font='bold 16px Arial Black';
-  ctx.fillText(`BEST: ${Math.floor(highScore)} m`,cx,cy+22);
+  // Restart button (blue rectangle – matches game's BTN_GO sprite color)
+  const pulse=1+Math.sin(performance.now()*0.005)*0.04;
+  const bw=220, bh=44, bx=cx-bw/2*pulse, by=(cy+50)*1-bh/2*pulse;
+  ctx.fillStyle='#0077EE';
+  ctx.fillRect(cx-bw/2, cy+50, bw, bh);
+  ctx.strokeStyle='#005ab5'; ctx.lineWidth=3;
+  ctx.strokeRect(cx-bw/2, cy+50, bw, bh);
+  ctx.fillStyle='#fff'; ctx.font='bold 16px Arial Black'; ctx.textAlign='center';
+  ctx.fillText('R  RESTART GAME', cx, cy+50+bh*0.62);
 
-  // Restart button – bright blue rounded rect (matching the game's blue buttons)
-  const p=1+Math.sin(performance.now()*0.005)*0.04;
-  ctx.save();ctx.translate(cx,cy+72);ctx.scale(p,p);
-  ctx.fillStyle='#0077EE';ctx.roundRect(-110,-22,220,44,8);ctx.fill();
-  ctx.strokeStyle='#005ab5';ctx.lineWidth=3;ctx.roundRect(-110,-22,220,44,8);ctx.stroke();
-  ctx.fillStyle='#fff';ctx.font='bold 16px Arial Black';ctx.textAlign='center';
-  ctx.fillText('R  RESTART GAME',0,6);
+  ctx.fillStyle='#888'; ctx.font='12px Arial';
+  ctx.fillText('SPACE or ENTER to restart', cx, cy+114);
+
   ctx.restore();
-
-  // Small hint text
-  ctx.fillStyle='#666';ctx.font='12px Arial';ctx.textAlign='center';
-  ctx.fillText('press SPACE or ENTER',cx,cy+106);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
