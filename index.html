@@ -74,19 +74,19 @@ window.addEventListener('resize', resize);
 const G            = 0.52;
 const WHEEL_R      = 14;
 const AXLE_DIST    = 58;       // rigid distance between wheel centres
-const DRIVE_F      = 0.38;
+const DRIVE_F      = 0.50;
 const BACK_F       = 0.20;
 const LEAN_T       = 0.055;    // lean torque magnitude
 const GROUND_FRIC  = 0.984;
 const AIR_DRAG     = 0.9995;
-const MAX_SPD      = 17;
+const MAX_SPD      = 22;
 const BOOST_SPD    = 28;
 const BOOST_DUR    = 80;
 const SUBSTEPS     = 5;        // physics sub-steps per frame
 const RESTITUTION  = 0.08;
 
 const ENERGY_MAX      = 100;
-const ENERGY_DRAIN    = 0.017;
+const ENERGY_DRAIN    = 0.038;
 const BOX_INTERVAL_M  = 100;   // metres between energy boxes
 const M_PER_PX        = 0.1;
 const CHUNK_W         = 900;
@@ -154,17 +154,15 @@ function genChunk(startX, seed) {
   terrPts.push(...pts);
   chunks.push(endX);
 
-  // Add ramps
-  const numRamps = 1 + Math.floor(seededRand(seed) * 3);
-  for (let r = 0; r < numRamps; r++) {
-    const rs = seededRand(seed * 17 + r * 31);
-    const rx = startX + 120 + rs * (CHUNK_W - 240);
-    const isSpeed = seededRand(seed * 7 + r) < 0.22;
+  // Add speed ramps only (one per chunk, ~40% chance)
+  if (seededRand(seed * 7) < 0.40) {
+    const rs = seededRand(seed * 17);
+    const rx = startX + 150 + rs * (CHUNK_W - 300);
     ramps.push({
       x:      rx,
-      width:  55 + seededRand(seed + r * 3) * 75,
-      height: isSpeed ? 28 + seededRand(seed + r) * 18 : 18 + seededRand(seed + r) * 38,
-      type:   isSpeed ? 'speed' : 'jump'
+      width:  60 + seededRand(seed * 3) * 50,
+      height: 28 + seededRand(seed) * 18,
+      type:   'speed'
     });
   }
 }
@@ -542,7 +540,7 @@ function drawTerrain() {
   for (const p of pts) ctx.lineTo(sx(p.x), p.y);
   ctx.strokeStyle = '#7ed44a'; ctx.lineWidth = 3; ctx.stroke();
 
-  // Grass tufts
+  // Grass tufts – heights are seeded from x so they never flicker
   ctx.lineWidth = 1.5;
   for (let i = 0; i < pts.length; i += 4) {
     const p   = pts[i];
@@ -551,8 +549,9 @@ function drawTerrain() {
     ctx.save(); ctx.translate(spx, spy); ctx.rotate(ang);
     ctx.strokeStyle = '#55aa28';
     for (let j = -1; j <= 1; j++) {
+      const h = 5 + seededRand(p.x * 0.1 + j * 7.3) * 4;
       ctx.beginPath(); ctx.moveTo(j * 3, 0);
-      ctx.lineTo(j * 3.5 - 1, -6 - Math.random() * 3); ctx.stroke();
+      ctx.lineTo(j * 3.5 - 1, -h); ctx.stroke();
     }
     ctx.restore();
   }
