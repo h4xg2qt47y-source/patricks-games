@@ -333,45 +333,46 @@ function updateCamera(){
 const sX=wx=>wx-camX;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DRAW – BACKGROUND  (gray checkerboard, matching the actual game)
+//  DRAW – BACKGROUND
+//  Exact colors from the actual game's tiledbackground2 tile: #868688 / #7a7a7c
+//  Tile size 250px → each checker square = 125px
 // ─────────────────────────────────────────────────────────────────────────────
 function drawBackground(){
-  const tileSize=80;
-  const offX=((camX*0.12)%tileSize+tileSize)%tileSize;
-  for(let ty=0;ty<canvas.height+tileSize;ty+=tileSize){
-    for(let tx=-offX;tx<canvas.width+tileSize;tx+=tileSize){
-      const row=Math.floor(ty/tileSize);
-      const col=Math.floor((tx+offX)/tileSize);
-      ctx.fillStyle=(row+col)%2===0?'#888':'#797979';
-      ctx.fillRect(tx,ty,tileSize,tileSize);
+  const sq = 125;
+  // Very slight parallax (0.12×) so it doesn't look totally static
+  const offX = ((-camX * 0.12) % sq + sq * 2) % sq;
+  for(let ty=0; ty<canvas.height+sq; ty+=sq){
+    for(let tx=-offX; tx<canvas.width+sq; tx+=sq){
+      const row = Math.floor(ty/sq);
+      const col = Math.floor((tx+offX)/sq);
+      ctx.fillStyle = (row+col)%2===0 ? '#868688' : '#7a7a7c';
+      ctx.fillRect(tx,ty,sq,sq);
     }
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DRAW – TERRAIN  (black fill, bright green surface line)
+//  DRAW – TERRAIN  (pure black fill, bright green surface line – matches game)
 // ─────────────────────────────────────────────────────────────────────────────
 function drawTerrain(){
   const m=80;
   const pts=terrPts.filter(p=>p.x>=camX-m&&p.x<=camX+canvas.width+m);
   if(pts.length<2)return;
 
+  // Pure black ground (matches ground_tiled sprite: rgb(0,0,0))
   ctx.beginPath();
   ctx.moveTo(sX(pts[0].x),pts[0].y);
   for(const p of pts)ctx.lineTo(sX(p.x),p.y);
   ctx.lineTo(sX(pts[pts.length-1].x),canvas.height+10);
   ctx.lineTo(sX(pts[0].x),canvas.height+10);
   ctx.closePath();
-  ctx.fillStyle='#111';ctx.fill();
+  ctx.fillStyle='#000';ctx.fill();
 
-  // Bright green surface strip
+  // Bright green surface line
   ctx.beginPath();
   ctx.moveTo(sX(pts[0].x),pts[0].y);
   for(const p of pts)ctx.lineTo(sX(p.x),p.y);
-  ctx.strokeStyle='#2ecc40';ctx.lineWidth=5;ctx.stroke();
-
-  // Slightly lighter green sub-line
-  ctx.strokeStyle='#1aa830';ctx.lineWidth=2;ctx.stroke();
+  ctx.strokeStyle='#2ecc40';ctx.lineWidth=6;ctx.lineJoin='round';ctx.stroke();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -400,7 +401,8 @@ function drawRamps(){
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DRAW – ENERGY PICKUPS  (battery box with green lightning bolt, like the game)
+//  DRAW – ENERGY PICKUPS
+//  Matches sheet1: black rectangle box + bright green (#00FF00) lightning bolt
 // ─────────────────────────────────────────────────────────────────────────────
 function drawEnergyBoxes(){
   const t=performance.now()*0.002;
@@ -408,142 +410,180 @@ function drawEnergyBoxes(){
     if(b.collected)continue;
     const bsx=sX(b.wx);
     if(bsx<-44||bsx>canvas.width+44)continue;
-    const gy=groundY(b.wx)-44+Math.sin(t+b.wx*0.008)*4;
-    ctx.save();ctx.translate(bsx,gy);
-    // Outer black box
-    ctx.fillStyle='#111';
-    ctx.fillRect(-14,-20,28,30);
-    ctx.strokeStyle='#444';ctx.lineWidth=1.5;
-    ctx.strokeRect(-14,-20,28,30);
-    // Green lightning bolt
-    ctx.fillStyle='#00ff44';
+    const gy=groundY(b.wx)-42+Math.sin(t+b.wx*0.008)*5;
+    ctx.save(); ctx.translate(bsx,gy);
+    // Black box (matches game sprite exactly)
+    ctx.fillStyle='#000';
+    ctx.fillRect(-16,-22,32,36);
+    // Bright green bolt (exactly #00FF00 as in sheet1)
+    ctx.fillStyle='#00FF00';
     ctx.beginPath();
-    ctx.moveTo(2,-16);ctx.lineTo(-5,2);ctx.lineTo(0,2);
-    ctx.lineTo(-2,16);ctx.lineTo(6,0);ctx.lineTo(1,0);ctx.closePath();
-    ctx.fill();
-    // Small red battery indicator at top
-    ctx.fillStyle='#ff3300';
-    ctx.fillRect(-8,-24,16,6);
-    ctx.fillStyle='#cc0000';
-    ctx.fillRect(4,-25,4,8);  // battery tip
+    ctx.moveTo(3,-18); ctx.lineTo(-7,2); ctx.lineTo(0,2);
+    ctx.lineTo(-3,18); ctx.lineTo(8,0);  ctx.lineTo(1,0);
+    ctx.closePath(); ctx.fill();
     ctx.restore();
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  DRAW – WHEEL
+//  DRAW – WHEEL  (matches actual WHEEL sprite: black circle, 4 crosshair spokes)
 // ─────────────────────────────────────────────────────────────────────────────
 function drawWheel(wx_,wy_,spin,r){
-  ctx.save();ctx.translate(wx_,wy_);
-  // Outer tyre – thick black
-  ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);
-  ctx.strokeStyle='#111';ctx.lineWidth=5;ctx.stroke();
-  // Inner rim
-  ctx.beginPath();ctx.arc(0,0,r*0.55,0,Math.PI*2);
-  ctx.strokeStyle='#333';ctx.lineWidth=2;ctx.stroke();
-  // 4 spokes (crosshair style like the game)
-  ctx.strokeStyle='#222';ctx.lineWidth=2;
+  ctx.save(); ctx.translate(wx_,wy_);
+  // Thick black tyre
+  ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+  ctx.fillStyle='#000'; ctx.fill();
+  // White inner area
+  ctx.beginPath(); ctx.arc(0,0,r*0.72,0,Math.PI*2);
+  ctx.fillStyle='#fff'; ctx.fill();
+  // 4 crosshair spokes (horizontal + vertical, as in sprite)
+  ctx.strokeStyle='#000'; ctx.lineWidth=Math.max(3, r*0.22);
   for(let i=0;i<4;i++){
-    const a=spin+i*Math.PI/4;
+    const a = spin + i*Math.PI/2;
     ctx.beginPath();
-    ctx.moveTo(Math.cos(a)*3,Math.sin(a)*3);
-    ctx.lineTo(Math.cos(a)*r*0.92,Math.sin(a)*r*0.92);
+    ctx.moveTo(0,0);
+    ctx.lineTo(Math.cos(a)*r*0.92, Math.sin(a)*r*0.92);
     ctx.stroke();
   }
-  // Hub dot
-  ctx.fillStyle='#444';ctx.beginPath();ctx.arc(0,0,3,0,Math.PI*2);ctx.fill();
+  // Hub circle
+  ctx.beginPath(); ctx.arc(0,0,r*0.18,0,Math.PI*2);
+  ctx.fillStyle='#000'; ctx.fill();
+  ctx.restore();
+}
+
+// Draw a red capsule (pill shape) – used for every rider body part
+function redCapsule(x, y, w, h, angle){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(angle);
+  ctx.fillStyle='#FF0000';
+  const r = w/2;
+  ctx.beginPath();
+  ctx.arc(0, -(h/2-r), r, Math.PI, 0);
+  ctx.lineTo(r, h/2-r);
+  ctx.arc(0, h/2-r, r, 0, Math.PI);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  DRAW – BIKE + RIDER
-//  Matches actual game sprites: black geometric frame, red blob rider
+//  Precisely matches actual sprite assets:
+//   body_bike:  black triangular frame with large rear-axle circle
+//   WHEEL:      black circle, 4 thick crosshair spokes, white rim area
+//   bodi_rider: red tall capsule
+//   legs/arms:  red narrow capsules
+//   head:       red circle
+//   shoes:      black teardrop
 // ─────────────────────────────────────────────────────────────────────────────
 function drawBike(){
-  const fsx=sX(fw.x),fsy=fw.y,rsx=sX(rw.x),rsy=rw.y;
-  const ang=Math.atan2(fsy-rsy,fsx-rsx);
-  const cx_=(fsx+rsx)/2,cy_=(fsy+rsy)/2;
+  const fsx=sX(fw.x), fsy=fw.y;
+  const rsx=sX(rw.x), rsy=rw.y;
+  const ang=Math.atan2(fsy-rsy, fsx-rsx);
+  const cx_=(fsx+rsx)/2, cy_=(fsy+rsy)/2;
+  const AD=AXLE_DIST;
 
-  // Boost glow
+  // ── Boost vfx ──
   if(boostFrames>0){
     const bt=boostFrames/BOOST_DUR;
-    ctx.save();ctx.globalAlpha=bt*0.35;
+    ctx.save(); ctx.globalAlpha=bt*0.30;
     ctx.fillStyle='#ffdd00';
-    ctx.beginPath();ctx.arc(cx_,cy_,80,0,Math.PI*2);ctx.fill();
+    ctx.beginPath(); ctx.arc(cx_,cy_,90,0,Math.PI*2); ctx.fill();
     ctx.restore();
-    // Speed lines
-    ctx.strokeStyle=`rgba(255,220,0,${bt*0.7})`;ctx.lineWidth=3;
+    ctx.strokeStyle=`rgba(255,220,0,${bt*0.8})`; ctx.lineWidth=4;
     for(let i=0;i<5;i++){
-      const ly=cy_+(i-2)*18;
-      ctx.beginPath();ctx.moveTo(cx_-40,ly);ctx.lineTo(cx_-80-i*12,ly);ctx.stroke();
+      const ly=cy_+(i-2)*20;
+      ctx.beginPath(); ctx.moveTo(cx_-50,ly); ctx.lineTo(cx_-90-i*14,ly); ctx.stroke();
     }
   }
 
+  // ── Wheels ──
   drawWheel(fsx,fsy,fw.spin,WHEEL_R);
   drawWheel(rsx,rsy,rw.spin,WHEEL_R);
 
-  ctx.save();ctx.translate(cx_,cy_);ctx.rotate(ang);
-  const AD=AXLE_DIST;
+  ctx.save(); ctx.translate(cx_,cy_); ctx.rotate(ang);
 
-  // ── Bike frame (black, heavy lines) ──
-  ctx.strokeStyle='#111';ctx.lineWidth=4;ctx.lineCap='round';ctx.lineJoin='round';
+  // ── Bike frame – matches body_bike sprite exactly ──
+  // The sprite shows: long top tube + diagonal down tube + large rear circle + head tube rect
+  ctx.fillStyle='#000'; ctx.strokeStyle='#000';
+  ctx.lineCap='round'; ctx.lineJoin='round';
 
-  // Chain stay (bottom)
-  ctx.beginPath();ctx.moveTo(-AD/2,0);ctx.lineTo(AD/2,0);ctx.stroke();
-  // Seat tube
-  ctx.beginPath();ctx.moveTo(-AD*0.08,0);ctx.lineTo(-AD*0.05,-28);ctx.stroke();
-  // Down tube
-  ctx.beginPath();ctx.moveTo(-AD/2,0);ctx.lineTo(AD*0.35,-12);ctx.stroke();
-  // Top tube
-  ctx.beginPath();ctx.moveTo(-AD*0.05,-28);ctx.lineTo(AD*0.35,-12);ctx.stroke();
-  // Fork
-  ctx.beginPath();ctx.moveTo(AD*0.35,-12);ctx.lineTo(AD/2,0);ctx.stroke();
-  // Seat post
-  ctx.beginPath();ctx.moveTo(-AD*0.05,-28);ctx.lineTo(-AD*0.08,-36);ctx.stroke();
-  // Seat
-  ctx.strokeStyle='#111';ctx.lineWidth=5;
-  ctx.beginPath();ctx.moveTo(-AD*0.22,-36);ctx.lineTo(AD*0.04,-36);ctx.stroke();
-  // Handlebar post
-  ctx.strokeStyle='#111';ctx.lineWidth=4;
-  ctx.beginPath();ctx.moveTo(AD*0.35,-12);ctx.lineTo(AD*0.34,-22);ctx.stroke();
-  // Handlebar
-  ctx.lineWidth=5;
-  ctx.beginPath();ctx.moveTo(AD*0.22,-22);ctx.lineTo(AD*0.46,-22);ctx.stroke();
+  // Down tube: long diagonal from front head-tube area diagonally to rear axle
+  ctx.lineWidth=9;
+  ctx.beginPath(); ctx.moveTo(AD/2-4, -6); ctx.lineTo(-AD/2+2, 2); ctx.stroke();
 
-  // ── Rider: red blob body (matching the game's big red oval) ──
-  // Body – large red oval
-  ctx.fillStyle='#EE0000';
+  // Top tube: horizontal bar from seat tube to head tube
+  ctx.lineWidth=9;
+  ctx.beginPath(); ctx.moveTo(-AD*0.12,-26); ctx.lineTo(AD/2-4,-26); ctx.stroke();
+
+  // Seat tube (near-vertical)
+  ctx.lineWidth=8;
+  ctx.beginPath(); ctx.moveTo(-AD*0.12,-2); ctx.lineTo(-AD*0.12,-28); ctx.stroke();
+
+  // Seat stay (diagonal from seat junction to rear axle)
+  ctx.lineWidth=7;
+  ctx.beginPath(); ctx.moveTo(-AD*0.12,-26); ctx.lineTo(-AD/2+2, 0); ctx.stroke();
+
+  // Fork (from head tube down to front axle)
+  ctx.lineWidth=8;
+  ctx.beginPath(); ctx.moveTo(AD/2-4,-26); ctx.lineTo(AD/2,0); ctx.stroke();
+
+  // Head tube (thick vertical rectangle at front – matches sprite)
+  ctx.fillRect(AD/2-12,-36, 14, 36);
+
+  // Seat post (above seat tube junction)
+  ctx.lineWidth=7;
+  ctx.beginPath(); ctx.moveTo(-AD*0.12,-28); ctx.lineTo(-AD*0.12,-38); ctx.stroke();
+
+  // Seat (horizontal bar)
+  ctx.lineWidth=9;
+  ctx.beginPath(); ctx.moveTo(-AD*0.28,-40); ctx.lineTo(AD*0.02,-40); ctx.stroke();
+
+  // Handlebar stem
+  ctx.lineWidth=7;
+  ctx.beginPath(); ctx.moveTo(AD/2-5,-36); ctx.lineTo(AD/2-5,-50); ctx.stroke();
+
+  // Handlebar (horizontal – matches sprite)
+  ctx.lineWidth=9;
+  ctx.beginPath(); ctx.moveTo(AD/2-18,-52); ctx.lineTo(AD/2+6,-52); ctx.stroke();
+
+  // Rear axle hub (large filled circle – the distinctive circle in the sprite)
+  ctx.beginPath(); ctx.arc(-AD/2, 0, 9, 0, Math.PI*2); ctx.fill();
+
+  // ── Rider – all pure #FF0000 capsules, exactly as in the game sprites ──
+
+  // Legs (two red capsules going to pedal area – offset for cycling pose)
+  const speed = (fw.vx+rw.vx)/2;
+  const pedalAngle = fw.spin * 0.8;
+  // Leg 1 (front leg)
+  redCapsule(-AD*0.08 + Math.cos(pedalAngle)*16,
+             -12      + Math.sin(pedalAngle)*10,
+             10, 30, pedalAngle*0.5);
+  // Leg 2 (back leg)
+  redCapsule(-AD*0.08 + Math.cos(pedalAngle+Math.PI)*16,
+             -12      + Math.sin(pedalAngle+Math.PI)*10,
+             10, 30, pedalAngle*0.5+Math.PI);
+
+  // Body (tall red capsule – bodi_rider sprite)
+  redCapsule(-AD*0.12, -42, 22, 48, 0);
+
+  // Arms (red capsules reaching toward handlebar)
+  redCapsule(AD*0.06, -42, 9, 28,  0.5);
+  redCapsule(AD*0.14, -40, 9, 26,  0.3);
+
+  // Head (red circle – head sprite)
+  ctx.beginPath(); ctx.arc(-AD*0.08, -70, 13, 0, Math.PI*2);
+  ctx.fillStyle='#FF0000'; ctx.fill();
+
+  // Black shoes/feet (teardrop shape – from sheet1)
+  ctx.fillStyle='#000';
   ctx.beginPath();
-  ctx.ellipse(-AD*0.04,-38,13,20,0.15,0,Math.PI*2);ctx.fill();
-
-  // Head – round red blob
+  ctx.ellipse(-AD*0.08+Math.cos(pedalAngle)*18,
+              -4+Math.sin(pedalAngle)*10, 9, 5, pedalAngle*0.4, 0, Math.PI*2);
+  ctx.fill();
   ctx.beginPath();
-  ctx.arc(-AD*0.04,-62,12,0,Math.PI*2);ctx.fill();
-
-  // Eyes – white + black
-  ctx.fillStyle='#fff';
-  ctx.beginPath();ctx.arc(-AD*0.04+5,-60,5,0,Math.PI*2);ctx.fill();
-  ctx.fillStyle='#111';
-  ctx.beginPath();ctx.arc(-AD*0.04+6,-60,2.5,0,Math.PI*2);ctx.fill();
-
-  // Helmet – black top
-  ctx.fillStyle='#111';
-  ctx.beginPath();
-  ctx.ellipse(-AD*0.04,-66,13,8,0,Math.PI,0);ctx.fill();
-
-  // Arms – thin black lines from body to handlebar
-  ctx.strokeStyle='#111';ctx.lineWidth=3;ctx.lineCap='round';
-  ctx.beginPath();ctx.moveTo(-AD*0.04,-48);ctx.lineTo(AD*0.34,-24);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(-AD*0.04,-48);ctx.lineTo(AD*0.26,-24);ctx.stroke();
-
-  // Legs – thin lines from body to pedals
-  ctx.beginPath();ctx.moveTo(-AD*0.04,-32);ctx.lineTo(-AD/2+6,-2);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(-AD*0.04,-32);ctx.lineTo(AD*0.06,-2);ctx.stroke();
-
-  // Shoes – black ovals (as in the game sprite)
-  ctx.fillStyle='#111';
-  ctx.beginPath();ctx.ellipse(-AD/2+8,-2,10,5,-0.3,0,Math.PI*2);ctx.fill();
-  ctx.beginPath();ctx.ellipse(AD*0.06+4,0,8,4,0.3,0,Math.PI*2);ctx.fill();
+  ctx.ellipse(-AD*0.08+Math.cos(pedalAngle+Math.PI)*18,
+              -4+Math.sin(pedalAngle+Math.PI)*10, 9, 5, pedalAngle*0.4+Math.PI, 0, Math.PI*2);
+  ctx.fill();
 
   ctx.restore();
 }
