@@ -59,19 +59,31 @@ window.addEventListener('resize', resize);
 // ─────────────────────────────────────────────────────────────────────────────
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
-const G            = 0.52;
-const WHEEL_R      = 14;
-const AXLE_DIST    = 58;
-const DRIVE_F      = 0.50;
-const BACK_F       = 0.20;
-const LEAN_T       = 0.055;
-const GROUND_FRIC  = 0.984;
-const AIR_DRAG     = 0.9995;
-const MAX_SPD      = 22;
-const BOOST_SPD    = 32;
-const BOOST_DUR    = 80;
-const SUBSTEPS     = 5;
-const RESTITUTION  = 0.08;
+const G              = 0.50;
+const WHEEL_R        = 14;
+const HALF_AXLE      = 29;      // wheel centre → bike centre
+
+// Movement
+const DRIVE_F        = 0.58;
+const BACK_F         = 0.30;
+const MAX_SPD        = 22;
+const BOOST_SPD      = 32;
+const BOOST_DUR      = 80;
+
+// ── Rotation: SEPARATE ground vs air ──────────────────────────────────────
+const GROUND_LEAN    = 0.044;   // lean torque while wheels are on ground
+const AIR_LEAN       = 0.016;   // lean torque in the air  (~36 % of ground)
+const GND_ANG_DAMP   = 0.74;    // strong damping on ground → snappy response
+const AIR_ANG_DAMP   = 0.97;    // gentle damping in air   → slow drift
+const AIR_STAB       = 0.013;   // auto-stabilise toward level while airborne
+
+// ── Ground physics ─────────────────────────────────────────────────────────
+const GROUND_FRIC    = 0.982;   // rolling friction
+const AIR_DRAG       = 0.9992;
+const TRACTION       = 0.20;    // wheel→terrain angle alignment per contact
+const GND_ALIGN      = 0.055;   // extra on-ground smooth-climb alignment
+const RESTITUTION    = 0.12;    // landing bounce coefficient
+const BOUNCE_VY_MIN  = 2.2;     // min vy that triggers bounce
 
 const ENERGY_MAX     = 100;
 const ENERGY_DRAIN   = 0.038;
@@ -94,10 +106,11 @@ function seededRand(n) {
   return x-Math.floor(x);
 }
 function noisy(x, seed) {
-  return Math.sin(x*0.008 +seed)       *65
-       + Math.sin(x*0.021 +seed*1.7)   *30
-       + Math.sin(x*0.055 +seed*3.3)   *12
-       + Math.sin(x*0.14  +seed*5.1)   *5;
+  // Long smooth rolling hills + medium undulations + small bumps
+  return Math.sin(x*0.005 + seed)         * 55   // slow rolls
+       + Math.sin(x*0.016 + seed*1.7)     * 28   // medium hills
+       + Math.sin(x*0.048 + seed*3.3)     *  9   // small bumps
+       + Math.sin(x*0.11  + seed*5.1)     *  3;  // surface texture
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +131,7 @@ function genChunk(startX, seed) {
     y=Math.min(y,canvas.height*0.85); y=Math.max(y,canvas.height*0.25);
     pts.push({x,y});
   }
-  smoothTerrain(pts,3);
+  smoothTerrain(pts,4);
   if (terrPts.length>0) {
     const lastY=terrPts[terrPts.length-1].y, blend=30;
     for (let i=0;i<Math.min(blend,pts.length);i++) {
@@ -183,62 +196,142 @@ function groundY(wx) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BIKE PHYSICS  (two-wheel Verlet)
+//  BIKE PHYSICS  – single rigid body + derived wheel positions
+//  bike.x / bike.y  = axle midpoint (centre of mass)
+//  bike.angle       = frame tilt (0 = horizontal)
+//  bike.angV        = angular velocity
 // ─────────────────────────────────────────────────────────────────────────────
-let fw,rw,boostFrames=0,crashed=false,deadFrames=0;
+let bike = {};
+let fwSpin = 0, rwSpin = 0;         // visual wheel rotation accumulator
+let boostFrames = 0, crashed = false, deadFrames = 0;
 
 function initBike() {
-  const sx=90,sy=getTerrainY(sx)-WHEEL_R;
-  fw={x:sx+AXLE_DIST/2,y:sy,vx:0,vy:0,onGround:false,spin:0};
-  rw={x:sx-AXLE_DIST/2,y:sy,vx:0,vy:0,onGround:false,spin:0};
-  boostFrames=0; crashed=false; deadFrames=0;
+  const sx = 100, sy = getTerrainY(sx) - WHEEL_R;
+  bike = { x:sx, y:sy, vx:0, vy:0, angle:0, angV:0,
+           onGround:false, wasOnGround:false };
+  fwSpin = 0; rwSpin = 0;
+  boostFrames = 0; crashed = false; deadFrames = 0;
 }
-function bikeAngle(){return Math.atan2(fw.y-rw.y,fw.x-rw.x);}
-function bikeCenterX(){return(fw.x+rw.x)/2;}
-function bikeCenterY(){return(fw.y+rw.y)/2;}
 
-function constrainAxle(){
-  const dx=fw.x-rw.x,dy=fw.y-rw.y,dist=Math.sqrt(dx*dx+dy*dy);
-  if(dist<1e-6)return;
-  const nx=dx/dist,ny=dy/dist,cor=(dist-AXLE_DIST)*0.5;
-  fw.x-=nx*cor;fw.y-=ny*cor;rw.x+=nx*cor;rw.y+=ny*cor;
-  const rv=(fw.vx-rw.vx)*nx+(fw.vy-rw.vy)*ny;
-  fw.vx-=rv*0.5*nx;fw.vy-=rv*0.5*ny;rw.vx+=rv*0.5*nx;rw.vy+=rv*0.5*ny;
-}
-function resolveWheel(w){
-  const gy=groundY(w.x)-WHEEL_R; w.onGround=false;
-  if(w.y>=gy){
-    w.y=gy;
-    const ta=getTerrainAngle(w.x),nx=Math.sin(ta),ny=-Math.cos(ta);
-    const vn=w.vx*nx+w.vy*ny;
-    if(vn<0){w.vx-=(1+RESTITUTION)*vn*nx;w.vy-=(1+RESTITUTION)*vn*ny;}
-    w.onGround=true;
+// Helpers used by game logic and rendering
+function bikeAngle()   { return bike.angle; }
+function bikeCenterX() { return bike.x; }
+function bikeCenterY() { return bike.y; }
+function fwPx() { return bike.x + Math.cos(bike.angle) * HALF_AXLE; }
+function fwPy() { return bike.y + Math.sin(bike.angle) * HALF_AXLE; }
+function rwPx() { return bike.x - Math.cos(bike.angle) * HALF_AXLE; }
+function rwPy() { return bike.y - Math.sin(bike.angle) * HALF_AXLE; }
+
+function stepPhysics() {
+  const goFwd  = K['ArrowUp'];
+  const goBwd  = K['ArrowDown'];
+  const leanL  = K['ArrowLeft'];
+  const leanR  = K['ArrowRight'];
+  const onGnd  = bike.onGround;
+  const boost  = boostFrames > 0;
+  if (boostFrames > 0) boostFrames--;
+
+  // ── Gravity ──────────────────────────────────────────────────────────────
+  bike.vy += G;
+
+  // ── Drive / Brake ─────────────────────────────────────────────────────────
+  const speedCap = boost ? BOOST_SPD : MAX_SPD;
+  if (goFwd) {
+    // On ground: push along slope for natural hill climbing
+    // In air:    reduced forward force along bike axis
+    const driveAng = onGnd ? getTerrainAngle(bike.x) : bike.angle * 0.25;
+    const f = onGnd ? DRIVE_F : DRIVE_F * 0.5;
+    bike.vx += Math.cos(driveAng) * f;
+    if (onGnd) bike.vy += Math.sin(driveAng) * f;
   }
-}
-function stepPhysics(){
-  const goF=K['ArrowUp'],goB=K['ArrowDown'],lL=K['ArrowLeft'],lR=K['ArrowRight'];
-  const boost=boostFrames>0;
-  if(boostFrames>0)boostFrames--;
-  const ang=bikeAngle(),ax=Math.cos(ang),px=-Math.sin(ang),py=Math.cos(ang);
-  const dF=(boost?BOOST_SPD*0.06:DRIVE_F)/SUBSTEPS,bF=BACK_F/SUBSTEPS,lF=LEAN_T/SUBSTEPS;
-  for(let s=0;s<SUBSTEPS;s++){
-    fw.vy+=G/SUBSTEPS;rw.vy+=G/SUBSTEPS;
-    if(goF){fw.vx+=ax*dF;rw.vx+=ax*dF;}
-    if(goB){fw.vx-=ax*bF;rw.vx-=ax*bF;}
-    if(lL){fw.vx-=px*lF;fw.vy-=py*lF;rw.vx+=px*lF;rw.vy+=py*lF;}
-    if(lR){fw.vx+=px*lF;fw.vy+=py*lF;rw.vx-=px*lF;rw.vy-=py*lF;}
-    const onG=fw.onGround||rw.onGround,drag=onG?GROUND_FRIC:AIR_DRAG;
-    fw.vx*=drag;rw.vx*=drag;
-    if(!onG){fw.vy*=AIR_DRAG;rw.vy*=AIR_DRAG;}
-    const cap=boost?BOOST_SPD:MAX_SPD;
-    if(fw.vx>cap)fw.vx=cap;if(rw.vx>cap)rw.vx=cap;
-    if(fw.vx<-8)fw.vx=-8;if(rw.vx<-8)rw.vx=-8;
-    fw.x+=fw.vx/SUBSTEPS;fw.y+=fw.vy/SUBSTEPS;
-    rw.x+=rw.vx/SUBSTEPS;rw.y+=rw.vy/SUBSTEPS;
-    constrainAxle();resolveWheel(fw);resolveWheel(rw);constrainAxle();
-    const avg=(fw.vx+rw.vx)/2;
-    fw.spin+=avg/WHEEL_R/SUBSTEPS;rw.spin+=avg/WHEEL_R/SUBSTEPS;
+  if (goBwd) {
+    const brakeAng = onGnd ? getTerrainAngle(bike.x) : 0;
+    bike.vx -= Math.cos(brakeAng) * BACK_F;
   }
+
+  // ── Lean torque (GROUND vs AIR speeds) ───────────────────────────────────
+  const leanSpd = onGnd ? GROUND_LEAN : AIR_LEAN;
+  if (leanL) bike.angV -= leanSpd;
+  if (leanR) bike.angV += leanSpd;
+
+  // ── Air auto-stabilisation (gently drift toward level) ───────────────────
+  if (!onGnd) {
+    const normAng = Math.atan2(Math.sin(bike.angle), Math.cos(bike.angle));
+    bike.angV -= normAng * AIR_STAB;
+  }
+
+  // ── Angular damping (GROUND vs AIR) ──────────────────────────────────────
+  bike.angV *= onGnd ? GND_ANG_DAMP : AIR_ANG_DAMP;
+
+  // ── Apply rotation ────────────────────────────────────────────────────────
+  bike.angle += bike.angV;
+
+  // ── Friction / drag ───────────────────────────────────────────────────────
+  if (onGnd) {
+    bike.vx *= GROUND_FRIC;
+  } else {
+    bike.vx *= AIR_DRAG;
+    bike.vy *= AIR_DRAG;
+  }
+
+  // ── Speed cap ─────────────────────────────────────────────────────────────
+  if (bike.vx >  speedCap)       bike.vx = speedCap;
+  if (bike.vx < -MAX_SPD * 0.42) bike.vx = -MAX_SPD * 0.42;
+
+  // ── Integrate ─────────────────────────────────────────────────────────────
+  bike.x += bike.vx;
+  bike.y += bike.vy;
+
+  // ── Ground collision ──────────────────────────────────────────────────────
+  bike.wasOnGround = bike.onGround;
+  bike.onGround    = false;
+
+  const fwx = fwPx(), fwy = fwPy();
+  const rwx = rwPx(), rwy = rwPy();
+  const fwGY = groundY(fwx) - WHEEL_R;
+  const rwGY = groundY(rwx) - WHEEL_R;
+  const fwPen = fwy - fwGY;
+  const rwPen = rwy - rwGY;
+  const fwHit = fwPen > 0;
+  const rwHit = rwPen > 0;
+
+  if (fwHit || rwHit) {
+    // Push centre up by the deeper penetration
+    const pen = Math.max(fwHit ? fwPen : 0, rwHit ? rwPen : 0);
+    bike.y -= pen * 0.92;
+
+    // Slight landing bounce when hitting ground with speed
+    if (!bike.wasOnGround && bike.vy > BOUNCE_VY_MIN) {
+      bike.vy *= -RESTITUTION;
+    } else {
+      bike.vy = Math.min(bike.vy, 0) * 0.12;  // absorb downward velocity
+    }
+
+    bike.onGround = true;
+
+    // Wheel traction: rotate frame toward terrain angle at each contact point
+    if (fwHit) {
+      const ta  = getTerrainAngle(fwx);
+      const err = Math.atan2(Math.sin(ta - bike.angle), Math.cos(ta - bike.angle));
+      bike.angV += err * TRACTION;
+    }
+    if (rwHit) {
+      const ta  = getTerrainAngle(rwx);
+      const err = Math.atan2(Math.sin(ta - bike.angle), Math.cos(ta - bike.angle));
+      bike.angV += err * TRACTION;
+    }
+  }
+
+  // ── Smooth hill climbing: continuous terrain alignment on ground ──────────
+  if (bike.onGround) {
+    const ta  = getTerrainAngle(bike.x);
+    const err = Math.atan2(Math.sin(ta - bike.angle), Math.cos(ta - bike.angle));
+    bike.angV += err * GND_ALIGN;
+  }
+
+  // ── Visual wheel spin ─────────────────────────────────────────────────────
+  fwSpin += bike.vx / WHEEL_R;
+  rwSpin += bike.vx / WHEEL_R;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,7 +359,7 @@ function restart(){
   newBest=false;gameState='playing';
   particles=[];flash=0;boostVfx=0;
   initTerrain();initBike();
-  camX=fw.x-canvas.width*0.33;
+  camX=bike.x-canvas.width*0.33;
 }
 window.addEventListener('keydown',e=>{
   if((e.code==='Space'||e.code==='Enter')&&gameState==='dead')restart();
@@ -279,7 +372,7 @@ function update(){
   if(gameState!=='playing'){deadFrames++;return;}
   stepPhysics();
   const cx=bikeCenterX(),cy=bikeCenterY();
-  const moving=Math.abs((fw.vx+rw.vx)/2)>0.3;
+  const moving=Math.abs(bike.vx)>0.3;
   energy-=ENERGY_DRAIN*(moving?1:0.4);
   if(K['ArrowUp'])energy-=ENERGY_DRAIN*0.8;
   energy=Math.max(0,energy);
@@ -300,11 +393,11 @@ function update(){
   for(const r of ramps){
     if(r.type!=='speed'||boostFrames>0)continue;
     const mid=r.x+r.width/2;
-    if(Math.abs(cx-mid)<r.width*0.55&&(fw.onGround||rw.onGround)){
+    if(Math.abs(cx-mid)<r.width*0.55&&bike.onGround){
       const ry=rampY(r,cx);
       if(ry!==null){
         boostFrames=BOOST_DUR;
-        fw.vx=rw.vx=Math.max(fw.vx,BOOST_SPD*0.65);
+        bike.vx=Math.max(bike.vx,BOOST_SPD*0.65);
         boostVfx=55;spawnParts(cx,cy,'#ffdd00',22,6);break;
       }
     }
@@ -313,7 +406,7 @@ function update(){
   const ang=bikeAngle();
   let norm=((ang%(Math.PI*2))+Math.PI*2)%(Math.PI*2);
   if(norm>Math.PI)norm=Math.PI*2-norm;
-  if(norm>Math.PI*0.60&&(fw.onGround||rw.onGround)){die('crash');return;}
+  if(norm>Math.PI*0.60&&bike.onGround){die('crash');return;}
   if(boostVfx>0)boostVfx--;
   extendTerrain(camX);
 }
@@ -325,8 +418,10 @@ function updateParticles(){
   }
 }
 function updateCamera(){
-  const tx=bikeCenterX()-canvas.width*0.33;
-  camX+=(tx-camX)*0.09;
+  // Look-ahead: target shifts forward proportional to speed
+  const lookAhead = bike.vx * 4.5;
+  const tx = bikeCenterX() + lookAhead - canvas.width * 0.35;
+  camX += (tx - camX) * 0.07;
 }
 const sX=wx=>wx-camX;
 
@@ -470,11 +565,11 @@ function redCapsule(x, y, w, h, angle){
 //   shoes:      black teardrop
 // ─────────────────────────────────────────────────────────────────────────────
 function drawBike(){
-  const fsx=sX(fw.x), fsy=fw.y;
-  const rsx=sX(rw.x), rsy=rw.y;
-  const ang=Math.atan2(fsy-rsy, fsx-rsx);
+  const fsx=sX(fwPx()), fsy=fwPy();
+  const rsx=sX(rwPx()), rsy=rwPy();
+  const ang=bike.angle;
   const cx_=(fsx+rsx)/2, cy_=(fsy+rsy)/2;
-  const AD=AXLE_DIST;
+  const AD=HALF_AXLE*2;
 
   // ── Boost vfx ──
   if(boostFrames>0){
@@ -491,8 +586,8 @@ function drawBike(){
   }
 
   // ── Wheels ──
-  drawWheel(fsx,fsy,fw.spin,WHEEL_R);
-  drawWheel(rsx,rsy,rw.spin,WHEEL_R);
+  drawWheel(fsx,fsy,fwSpin,WHEEL_R);
+  drawWheel(rsx,rsy,rwSpin,WHEEL_R);
 
   ctx.save(); ctx.translate(cx_,cy_); ctx.rotate(ang);
 
